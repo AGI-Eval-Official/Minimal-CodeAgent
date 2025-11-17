@@ -92,11 +92,32 @@ def apply_json_fix():
        
         original_function = lite_llm_module._message_to_generate_content_response
         
-        def patched_function(message, is_partial: bool = False):
+        def patched_function(*args, **kwargs):
+            """
+            Patched function that handles all possible argument signatures.
+            Uses *args and **kwargs to be compatible with any function signature.
+            """
             try:
-                return original_function(message, is_partial)
-            except json.JSONDecodeError as e:
-                logger_patch.warning(f"Detected JSON error, using fix version: {e}")
+                # Try calling the original function with all arguments
+                return original_function(*args, **kwargs)
+            except (json.JSONDecodeError, TypeError, ValueError) as e:
+                logger_patch.warning(f"Detected error in _message_to_generate_content_response, using fix version: {e}")
+                
+                # Extract message from args or kwargs
+                message = None
+                is_partial = False
+                
+                if args:
+                    message = args[0]
+                    if len(args) > 1:
+                        is_partial = args[1]
+                elif 'message' in kwargs:
+                    message = kwargs['message']
+                    is_partial = kwargs.get('is_partial', False)
+                
+                if message is None:
+                    # If we can't extract message, re-raise the original error
+                    raise e
                 
                 # Fix version response generation
                 from google.genai import types
@@ -111,10 +132,10 @@ def apply_json_fix():
                         if tool_call.type == "function":
                             try:
                                 # Use safe JSON parsing
-                                args = _safe_json_loads(tool_call.function.arguments or "{}")
+                                args_json = _safe_json_loads(tool_call.function.arguments or "{}")
                                 part = types.Part.from_function_call(
                                     name=tool_call.function.name,
-                                    args=args,
+                                    args=args_json,
                                 )
                                 part.function_call.id = tool_call.id
                                 parts.append(part)
@@ -702,7 +723,7 @@ def interactive_system_command(
     except Exception as e:
         return {"error": f"Failed to execute interactive command: {str(e)}"}
 
-def run_interactive_python_code(tool_context: ToolContext, cmd: str, session_id: Optional[str] = None, timeout: int = 30):
+def run_interactive_python_code(tool_context: ToolContext, cmd: str, session_id: Optional[str] = None, user_input: Optional[str] = None, timeout: int = 30):
     """
     Run an interactive Python code session.
     
@@ -713,11 +734,11 @@ def run_interactive_python_code(tool_context: ToolContext, cmd: str, session_id:
         tool_context: Tool context
         cmd: Python code to execute
         session_id: Session ID, for continuing the previous session
+        user_input: Content to input to Python code
         timeout: Execution timeout (seconds)
     Returns:
         dict: Dictionary with execution result
     """
-    session_id = None
     try:
         result = step(
             cmd=cmd,
